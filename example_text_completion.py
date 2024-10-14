@@ -66,4 +66,6 @@ def main(
 
 
 if __name__ == "__main__":
+
+    # fire.Fire的作用在于，直接将函数参数作为命令行参数.
     fire.Fire(main)
