@@ -18,6 +18,16 @@ def main(
     max_gen_len: Optional[int] = None,
 ):
     """
+    参数：
+    ckpt_dir: 模型文件目录
+    tokenizer_path: 分词器文件路径
+    temperature: 改变生成文本的随机性， 通过改变生成结果的分布来影响结果
+    top_p: 
+    max_seq_len: 输入最大序列长度
+    max_batch_size: 批量处理大小
+    max_gen_len: 生成文本的最大长度
+
+
     Entry point of the program for generating text using a pretrained model.
 
     Args:
@@ -32,6 +42,8 @@ def main(
         max_gen_len (int, optional): The maximum length of generated sequences. If None, it will be
             set to the model's max sequence length. Defaults to None.
     """
+
+    # 获取一个Llama对象，用于对话聊天， 输入参数为模型路径，tokenizer路径，最大序列长度，最大批量处理大小
     generator = Llama.build(
         ckpt_dir=ckpt_dir,
         tokenizer_path=tokenizer_path,
@@ -39,6 +51,7 @@ def main(
         max_batch_size=max_batch_size,
     )
 
+    #定义对话列表，其中包含六组对话
     dialogs: List[Dialog] = [
         [{"role": "user", "content": "what is the recipe of mayonnaise?"}],
         [
@@ -84,6 +97,7 @@ If a question does not make any sense, or is not factually coherent, explain why
             }
         ],
     ]
+    # 利用生成的Llama对象，调用chat_completion方法，生成聊天内容，需要的参数包含了对话内容、最大生成长度和top_p等参数
     results = generator.chat_completion(
         dialogs,  # type: ignore
         max_gen_len=max_gen_len,
@@ -91,6 +105,7 @@ If a question does not make any sense, or is not factually coherent, explain why
         top_p=top_p,
     )
 
+    # 打印出对话内容
     for dialog, result in zip(dialogs, results):
         for msg in dialog:
             print(f"{msg['role'].capitalize()}: {msg['content']}\n")
@@ -101,4 +116,5 @@ If a question does not make any sense, or is not factually coherent, explain why
 
 
 if __name__ == "__main__":
+     # fire.Fire的作用在于，直接将函数参数作为命令行参数.
     fire.Fire(main)

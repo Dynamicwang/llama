@@ -59,6 +59,16 @@ class Llama:
         seed: int = 1,
     ) -> "Llama":
         """
+
+        参数：
+            ckpt_dir (str): 模型文件路径
+            tokenizer_path (str): 分词器文件路径
+            max_seq_len (int): 输入序列最大长度
+            max_batch_size (int): 批量大小
+            model_parallel_size (int): 模型并行大小
+            seed (int): 随机种子
+
+
         Build a Llama instance by initializing and loading a pre-trained model.
 
         Args:
@@ -81,14 +91,18 @@ class Llama:
             and loads the pre-trained model and tokenizer.
 
         """
+        # 如果没有初始化分布式进程组，则初始化后端为nccl
         if not torch.distributed.is_initialized():
             torch.distributed.init_process_group("nccl")
+        # 
         if not model_parallel_is_initialized():
             if model_parallel_size is None:
                 model_parallel_size = int(os.environ.get("WORLD_SIZE", 1))
             initialize_model_parallel(model_parallel_size)
 
+        # 通过环境变量获取本地进程的rank
         local_rank = int(os.environ.get("LOCAL_RANK", 0))
+        # 设置当前进程的设备使用第几块GPU
         torch.cuda.set_device(local_rank)
 
         # seed must be the same in all processes
@@ -98,30 +112,53 @@ class Llama:
             sys.stdout = open(os.devnull, "w")
 
         start_time = time.time()
+        # 获取模型的路径
         checkpoints = sorted(Path(ckpt_dir).glob("*.pth"))
+        #检查模型权重文件存在
         assert len(checkpoints) > 0, f"no checkpoint files found in {ckpt_dir}"
+        # 检查模型权重文件数量是否等于模型并行大小
         assert model_parallel_size == len(
             checkpoints
         ), f"Loading a checkpoint for MP={len(checkpoints)} but world size is {model_parallel_size}"
+        
+        # 根据模型并行的rank获取当前进程对应的模型权重文件
         ckpt_path = checkpoints[get_model_parallel_rank()]
+
+        # 加载模型权重到内存
         checkpoint = torch.load(ckpt_path, map_location="cpu")
+        
+        # 获取模型相关的参数信息
         with open(Path(ckpt_dir) / "params.json", "r") as f:
             params = json.loads(f.read())
 
+        # 根据传入的参数和从配置文件读取的参数，初始化ModelArgs对象
         model_args: ModelArgs = ModelArgs(
             max_seq_len=max_seq_len,
             max_batch_size=max_batch_size,
             **params,
         )
+
+        # 初始化tokenizer
         tokenizer = Tokenizer(model_path=tokenizer_path)
+
+        #通过分词器模型获取词表大小
         model_args.vocab_size = tokenizer.n_words
+
+        # 设置权重参数的精度为半精度
         torch.set_default_tensor_type(torch.cuda.HalfTensor)
+        
+        # 根据模型参数，定义模型结构
         model = Transformer(model_args)
+
+        # 加载模型权重到模型中
         model.load_state_dict(checkpoint, strict=False)
         print(f"Loaded in {time.time() - start_time:.2f} seconds")
 
+        # 将初始化好的模型和tokenizer封装到Llama对象中
         return Llama(model, tokenizer)
 
+
+    # build返回的就是调用该构造函数返回的Llama对象
     def __init__(self, model: Transformer, tokenizer: Tokenizer):
         self.model = model
         self.tokenizer = tokenizer
@@ -137,6 +174,14 @@ class Llama:
         echo: bool = False,
     ) -> Tuple[List[List[int]], Optional[List[List[float]]]]:
         """
+        参数：
+            prompt_tokens: 所有对话的token列表
+            max_gen_len: 生成文本的最大长度
+            temperature:  改变生成文本的随机性， 通过改变生成结果的分布来影响结果
+            top_p: 
+            logprobs: 是否返回每个token的对数概率
+            echo: 是否在生成文本中包含原始的prompt
+
         Generate text sequences based on provided prompts using the language generation model.
 
         Args:
@@ -156,23 +201,44 @@ class Llama:
 
         """
         params = self.model.params
+        
+        # 得到输入数据的batch size
         bsz = len(prompt_tokens)
+
+        # 检查batch size是否超过模型的最大batch size
         assert bsz <= params.max_batch_size, (bsz, params.max_batch_size)
 
+        # 得到不同batch的prompt的最大和最小长度
         min_prompt_len = min(len(t) for t in prompt_tokens)
         max_prompt_len = max(len(t) for t in prompt_tokens)
+
+        # 检查prompt的长度是否超过了模型的最大输入序列长度
         assert max_prompt_len <= params.max_seq_len
+
+        # 在最大输入序列长度、最大生成长度+最大输入prompt 之间取最小值作为实际的生成长度
         total_len = min(params.max_seq_len, max_gen_len + max_prompt_len)
 
+        # 初始化一个全为pad_id的tokens张量，大小为batch size * total_len
         pad_id = self.tokenizer.pad_id
         tokens = torch.full((bsz, total_len), pad_id, dtype=torch.long, device="cuda")
+
+        # 将prompt的token填充到tokens张量中， 在每个batch中， 前面存放输入prompt的token, 后面临时使用pad填充
+        # 例如：prompt_tokens = [[1, 2, 3], [4, 5, 6, 7]] tokens = [[1, 2, 3, pad, pad, pad], [4, 5, 6, 7, pad, pad]]
         for k, t in enumerate(prompt_tokens):
             tokens[k, : len(t)] = torch.tensor(t, dtype=torch.long, device="cuda")
+        
+        # 如果要得到每个token的概率，则初始化一个全为0的token_logprobs张量，大小为batch size * total_len
         if logprobs:
             token_logprobs = torch.zeros_like(tokens, dtype=torch.float)
 
+        #    
         prev_pos = 0
+
+        # 初始化一个全为False的eos_reached张量，大小为batch size， 标记某个batch中的prompt是否已经生成完毕
         eos_reached = torch.tensor([False] * bsz, device="cuda")
+
+        # 生成一个mask, 大小为batch size * total_len, 用来标记哪些位置是prompt的token, 哪些位置是pad， pad的位置为False, prompt的位置为True
+        # 如：tokens = [[1, 2, 3, pad, pad, pad], [4, 5, 6, 7, pad, pad]] input_text_mask = [[True, True, True, False, False, False], [True, True, True, True, False, False]]
         input_text_mask = tokens != pad_id
         if min_prompt_len == total_len:
             logits = self.model.forward(tokens, prev_pos)
@@ -183,9 +249,16 @@ class Llama:
                 ignore_index=pad_id,
             )
 
+        # 从最小的输入prompt的长度开始， 逐步增加prompt的长度，直到达到最大长度 
         for cur_pos in range(min_prompt_len, total_len):
+            # 所有batch的prev_pos:cur_pos之间的token，作为模型的输入token， 模型返回的结果为[batchsize, size, vocab_size]
             logits = self.model.forward(tokens[:, prev_pos:cur_pos], prev_pos)
+
+            # 如果temperature大于0，则使用top_p采样，否则使用argmax采样
             if temperature > 0:
+                # logits[:, -1]表示最后一个token的logits， 除以temperature后，再使用softmax函数，得到每个token的概率分布
+                # temperature越大，则概率分布越平滑，模型生成的文本等价多样化和随机。
+                # temperature越小，则概率分布越尖锐， 模型生成的文本更加确定和集中。
                 probs = torch.softmax(logits[:, -1] / temperature, dim=-1)
                 next_token = sample_top_p(probs, top_p)
             else:
@@ -281,6 +354,7 @@ class Llama:
             ]
         return [{"generation": self.tokenizer.decode(t)} for t in generation_tokens]
 
+    # 调用Llama对象的chat_completion方法，生成对话
     def chat_completion(
         self,
         dialogs: List[Dialog],
@@ -290,6 +364,14 @@ class Llama:
         logprobs: bool = False,
     ) -> List[ChatPrediction]:
         """
+        参数：
+            dialogs: List[Dialog] 对话列表，每个对话是一个消息列表
+            temperature: 
+            top_p: 
+            max_gen_len: Optional[int] 最大生成长度
+            logprobs: bool 是否返回每个生成的token的对数概率
+        
+        
         Generate assistant responses for a list of conversational dialogs using the language generation model.
 
         Args:
@@ -313,14 +395,23 @@ class Llama:
             If logprobs is True, token log probabilities are computed for each generated token.
 
         """
+        # 如果没有设置最大生成长度，则设置为模型的最大输入序列长度减1
         if max_gen_len is None:
             max_gen_len = self.model.params.max_seq_len - 1
+        
+        # 
         prompt_tokens = []
         unsafe_requests = []
+
+        # 遍历对话列表,执行完后，prompt_tokens中存储的是所有对话的prompt，如：[[dialog1 tokens], [dialog2 tokens], ...]
+        # unsafe_requests中存储的是所有对话是否包含非法字符，如果有，则记录为true，如：[False, True, ...]
         for dialog in dialogs:
+            # 所有的对话是否包含非法字符，如果有，则记录为true
             unsafe_requests.append(
                 any([tag in msg["content"] for tag in SPECIAL_TAGS for msg in dialog])
             )
+
+            # 检测对话的第一条消息是否是系统消息，如果是，则使用B_SYS作为前缀，E_SYS作为后缀,并将系统提示拼接到下一条消息之前。后面的保持不变
             if dialog[0]["role"] == "system":
                 dialog = [
                     {
@@ -331,12 +422,18 @@ class Llama:
                         + dialog[1]["content"],
                     }
                 ] + dialog[2:]
+            # 判断所有的对话顺序为，user, assistant, user, assistant, ...
             assert all([msg["role"] == "user" for msg in dialog[::2]]) and all(
                 [msg["role"] == "assistant" for msg in dialog[1::2]]
             ), (
                 "model only supports 'system', 'user' and 'assistant' roles, "
                 "starting with 'system', then 'user' and alternating (u/a/u/a/u...)"
             )
+
+            # 将一组对话中的所有消息根据user和assistant进行拼接，并使用B_INST和E_INST作为user的prompt的前缀和后缀
+            # 将拼接的对话转换为token，tokenizer.encode()函数将将文本转换为一个列表，列表中的每个元素是一个token的id
+            # 最终得到的就是多轮对话的token列表，例如：[[user+assistant token], [user+assistant token], ...]
+            # 使用sum()函数将列表中的所有元素进行拼接，得到的就是多轮对话的token列表, 最终的结果是[user+assistant token, user+assistant token, ...]
             dialog_tokens: List[int] = sum(
                 [
                     self.tokenizer.encode(
@@ -351,16 +448,20 @@ class Llama:
                 ],
                 [],
             )
+            # 判断最后一个对话是用户, 否则报错, 因为模型只能接受用户输入
             assert (
                 dialog[-1]["role"] == "user"
             ), f"Last message must be from user, got {dialog[-1]['role']}"
+            # 上面成组的将对话转换为token， 根据user和assistant成对， 那势必会剩下当前轮的user， 所以需要单独处理
             dialog_tokens += self.tokenizer.encode(
                 f"{B_INST} {(dialog[-1]['content']).strip()} {E_INST}",
                 bos=True,
                 eos=False,
             )
+            # 将一组完成对话的tokens添加到prompt_tokens中
             prompt_tokens.append(dialog_tokens)
 
+        # 根据上面生成的token, 进行对话结果的生成
         generation_tokens, generation_logprobs = self.generate(
             prompt_tokens=prompt_tokens,
             max_gen_len=max_gen_len,
@@ -368,7 +469,9 @@ class Llama:
             top_p=top_p,
             logprobs=logprobs,
         )
+        # 将生成的token转换为文本， 分为两种情况， 如果logprobs为True， 则返回文本和logprobs， 否则只返回文本
         if logprobs:
+            # 生成文本和logprobs, 根据unsafe参数决定是否返回原始文本, 如果unsafe为True, 则返回原始文本, 否则返回解码后的文本
             return [
                 {
                     "generation": {
@@ -384,6 +487,7 @@ class Llama:
                     generation_tokens, generation_logprobs, unsafe_requests
                 )
             ]
+        # 如果logprobs为False， 则只返回文本，根据unsafe判断是否返回错误信息, 如果unsafe为True， 则返回错误信息 UNSAFE_ERROR
         return [
             {
                 "generation": {
@@ -419,3 +523,5 @@ def sample_top_p(probs, p):
     next_token = torch.multinomial(probs_sort, num_samples=1)
     next_token = torch.gather(probs_idx, -1, next_token)
     return next_token
+
+
