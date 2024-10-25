@@ -515,6 +515,7 @@ def sample_top_p(probs, p):
         exceeds the threshold p. The distribution is renormalized based on the selected tokens.
 
     """
+    # 对所有的概率进行降序排列
     probs_sort, probs_idx = torch.sort(probs, dim=-1, descending=True)
     probs_sum = torch.cumsum(probs_sort, dim=-1)
     mask = probs_sum - probs_sort > p
