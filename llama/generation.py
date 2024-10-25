@@ -517,11 +517,20 @@ def sample_top_p(probs, p):
     """
     # 对所有的概率进行降序排列
     probs_sort, probs_idx = torch.sort(probs, dim=-1, descending=True)
+    # 计算累积概率， 如果有一维数组 [a, b, c, d]，那么它的累积和结果会是 [a, a+b, a+b+c, a+b+c+d]
     probs_sum = torch.cumsum(probs_sort, dim=-1)
+    # 得到一个mask ，如果累积概率大于p，则mask为True，否则为False
+    # 例如：[0.1, 0.2, 0.3, 0.4] p=0.3，则mask为[True, True, False, False]
     mask = probs_sum - probs_sort > p
+    # 将mask为True的值设置为0.0, 
     probs_sort[mask] = 0.0
+    # 对mask以后得概率进行归一化
     probs_sort.div_(probs_sort.sum(dim=-1, keepdim=True))
+    # 对归一化后的概率进行采样,采样得到的是对应概率所在位置的索引
     next_token = torch.multinomial(probs_sort, num_samples=1)
+    # 根据索引从probs_idx中获取对应的token
+    # 例如：probs_idx为原始概率排序后的索引表，例如原始【2,3,1,4],经过排序后为【4， 3， 2， 1】，得然后probs_idx为【3， 1， 0， 2】
+    #  假如next_token为[0], 则probs_idx[next_token]为[3]，即原始概率中第3个位置的概率
     next_token = torch.gather(probs_idx, -1, next_token)
     return next_token
 
