@@ -251,7 +251,7 @@ class Llama:
 
         # 从最小的输入prompt的长度开始， 逐步增加prompt的长度，直到达到最大长度 
         for cur_pos in range(min_prompt_len, total_len):
-            # 所有batch的prev_pos:cur_pos之间的token，作为模型的输入token， 模型返回的结果为[batchsize, size, vocab_size]
+            # 所有batch的prev_pos:cur_pos之间的token，作为模型的输入token， 模型返回的结果为[batchsize,size ,vocab_size]
             logits = self.model.forward(tokens[:, prev_pos:cur_pos], prev_pos)
 
             # 如果temperature大于0，则使用top_p采样，否则使用argmax采样
@@ -260,16 +260,27 @@ class Llama:
                 # temperature越大，则概率分布越平滑，模型生成的文本等价多样化和随机。
                 # temperature越小，则概率分布越尖锐， 模型生成的文本更加确定和集中。
                 probs = torch.softmax(logits[:, -1] / temperature, dim=-1)
+                # 采样得到下一个token
                 next_token = sample_top_p(probs, top_p)
             else:
+                # 如果temperature小于等于0，则使用argmax采样，即选择概率最大的token
                 next_token = torch.argmax(logits[:, -1], dim=-1)
 
+            #上一步采样得到的next_token的维度为[batchsize, 1], 需要将其reshape为[batchsize], 然后将其添加到tokens中
             next_token = next_token.reshape(-1)
+
             # only replace token if prompt has already been generated
+            # input_text_mask为使用pad的mask矩阵，如果当前位置为pad，则input_text_mask[:, cur_pos]为fasle， :表示取所有样本的该位置
+            # torch.where(condition, x, y)函数表示如果condition为true，则返回x，否则返回y
+            # 所以下面的意思是，根据cur_pos是否为pad，来决定是否将next_token添加到tokens中
             next_token = torch.where(
                 input_text_mask[:, cur_pos], tokens[:, cur_pos], next_token
             )
+
+            # 将next_token添加到tokens中
             tokens[:, cur_pos] = next_token
+
+            # 如果需要计算logprobs，则计算当前token的logprob
             if logprobs:
                 token_logprobs[:, prev_pos + 1 : cur_pos + 1] = -F.cross_entropy(
                     input=logits.transpose(1, 2),
