@@ -288,6 +288,7 @@ class Llama:
                     reduction="none",
                     ignore_index=pad_id,
                 )
+            #
             eos_reached |= (~input_text_mask[:, cur_pos]) & (
                 next_token == self.tokenizer.eos_id
             )
