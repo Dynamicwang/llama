@@ -288,31 +288,48 @@ class Llama:
                     reduction="none",
                     ignore_index=pad_id,
                 )
-            #
+            #input_text_mask中存储的是当前token是否为pad，如果为pad，则input_text_mask[:, cur_pos]为false，否则为true
+            #~表示取反，所以~input_text_mask[:, cur_pos]表示当前token是否为pad，为pad，则~input_text_mask[:, cur_pos]为true，否则为false
+            # eos_reached表示是否已经到达eos，如果到达eos，则eos_reached为true，否则为false
+            # next_token == self.tokenizer.eos_id表示当前token是否为eos，如果是eos，则next_token == self.tokenizer.eos_id为true，否则为false
+            # 所以eos_reached |= (~input_text_mask[:, cur_pos]) & (next_token == self.tokenizer.eos_id)
+            # 表示如果当前token为pad且next_token为eos，则eos_reached为true
             eos_reached |= (~input_text_mask[:, cur_pos]) & (
                 next_token == self.tokenizer.eos_id
             )
             prev_pos = cur_pos
+            # 如果所有batch中的token都已经到达eos，则退出循环
             if all(eos_reached):
                 break
 
         if logprobs:
             token_logprobs = token_logprobs.tolist()
         out_tokens, out_logprobs = [], []
+        # 遍历所有的batch
+        # toks表示当前batch中的token
         for i, toks in enumerate(tokens.tolist()):
             # cut to max gen len
+            #echo表示是否输出prompt, 如果echo为true，则输出prompt，否则不输出prompt
             start = 0 if echo else len(prompt_tokens[i])
+            # 获取将要输出的token， 从start开始，到len(prompt_tokens[i]) + max_gen_len
             toks = toks[start : len(prompt_tokens[i]) + max_gen_len]
             probs = None
+            # 如果logprobs为true，则获取当前batch中的token的概率
             if logprobs:
                 probs = token_logprobs[i][start : len(prompt_tokens[i]) + max_gen_len]
             # cut to eos tok if any
+            # 判断当前batch中的token是否包含eos，如果包含，则获取到eos之前的token
             if self.tokenizer.eos_id in toks:
+                # 获取eos的位置索引
                 eos_idx = toks.index(self.tokenizer.eos_id)
+                # 获取在eos之前的token
                 toks = toks[:eos_idx]
+                # 获取在eos之前的token的概率
                 probs = probs[:eos_idx] if logprobs else None
+            # 将结果添加到out_tokens和out_logprobs中
             out_tokens.append(toks)
             out_logprobs.append(probs)
+        # 返回结果
         return (out_tokens, out_logprobs if logprobs else None)
 
     def text_completion(
